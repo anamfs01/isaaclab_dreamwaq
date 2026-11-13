@@ -11,7 +11,6 @@ from rsl_rl.env import VecEnv
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_quadlocofault.custom_manager_based_rl_env import CustomManagerBasedRLEnv
 
-
 class CustomRslRlVecEnvWrapper(VecEnv):
     """Wraps around Isaac Lab environment for RSL-RL library
 
@@ -55,9 +54,9 @@ class CustomRslRlVecEnvWrapper(VecEnv):
         else:
             self.num_actions = gym.spaces.flatdim(self.unwrapped.single_action_space)
         if hasattr(self.unwrapped, "observation_manager"):
-            self.num_obs = self.unwrapped.observation_manager.group_obs_dim["policy"][0]
+            self.num_obs = self.unwrapped.observation_manager.group_obs_dim["actor"][0]
         else:
-            self.num_obs = gym.spaces.flatdim(self.unwrapped.single_observation_space["policy"])
+            self.num_obs = gym.spaces.flatdim(self.unwrapped.single_observation_space["actor"])
         # -- privileged observations
         if (
             hasattr(self.unwrapped, "observation_manager")
@@ -149,7 +148,7 @@ class CustomRslRlVecEnvWrapper(VecEnv):
         # reset the environment
         obs_dict, _ = self.env.reset()
         # return observations
-        return obs_dict["policy"], {"observations": obs_dict}
+        return obs_dict["actor"], {"observations": obs_dict}
 
     def get_observations(self) -> tuple[torch.Tensor, dict]:
         """Returns the current observations of the environment."""

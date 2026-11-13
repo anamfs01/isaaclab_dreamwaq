@@ -15,10 +15,11 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers.manager_base import ManagerTermBase
 from isaaclab.managers.manager_term_cfg import ObservationTermCfg
-from isaaclab.sensors import ContactSensor, RayCaster
+from isaaclab.sensors import RayCaster
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
 
 def _safe_obs_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Replace NaN/Inf values before sending observations to the policy."""
@@ -29,9 +30,21 @@ def _safe_obs_tensor(tensor: torch.Tensor) -> torch.Tensor:
         neginf=0.0,
     )
 
+
 class CustomProprioceptiveObservations(ManagerTermBase):
     """
-    Standard proprioceptive observations used by DreamWaQ.
+    45-D proprioceptive observation used by DreamWaQ.
+
+    Observation layout:
+        12 - joint position error
+        12 - joint velocity
+         3 - base angular velocity
+         3 - projected gravity
+         3 - commanded base velocity
+        12 - previous action
+
+    Total:
+        45 dimensions
     """
 
     def __init__(
@@ -44,8 +57,9 @@ class CustomProprioceptiveObservations(ManagerTermBase):
 
         self.num_action = num_action
 
-        self.asset: Articulation = env.scene[cfg.params["asset_cfg"].name]
-        self.contact_sensor: ContactSensor = env.scene.sensors["contact_forces"]
+        self.asset: Articulation = env.scene[
+            cfg.params["asset_cfg"].name
+        ]
 
         self.asset_cfg = cfg.params["asset_cfg"]
         self.sensor_cfg = cfg.params["sensor_cfg"]
@@ -56,13 +70,13 @@ class CustomProprioceptiveObservations(ManagerTermBase):
             device=self.device,
         )
 
-        self.foot_ids, _ = self.contact_sensor.find_bodies(
-            ".*_foot",
-            preserve_order=True,
-        )
-
     def reset(self, env_ids: Sequence[int] | None = None):
-        self._prev_action[env_ids] = 0.0
+        """Reset the stored previous actions."""
+
+        if env_ids is None:
+            self._prev_action.zero_()
+        else:
+            self._prev_action[env_ids] = 0.0
 
     def __call__(
         self,
@@ -71,14 +85,9 @@ class CustomProprioceptiveObservations(ManagerTermBase):
         sensor_cfg: SceneEntityCfg,
     ) -> torch.Tensor:
 
-        forces_w = self.contact_sensor.data.net_forces_w
-        foot_forces = forces_w[:, self.foot_ids, :]
-
-        foot_contact = (
-            foot_forces.norm(dim=-1) > 1.0
-        ).float()
-
-        commands = env.command_manager.get_command("base_velocity")
+        commands = env.command_manager.get_command(
+            "base_velocity"
+        )
 
         actions = env.action_manager.get_term(
             "joint_pos"
@@ -86,42 +95,64 @@ class CustomProprioceptiveObservations(ManagerTermBase):
 
         observations = torch.cat(
             (
+                # 12 - joint position error
                 self.asset.data.joint_pos
                 - self.asset.data.default_joint_pos,
 
+                # 12 - joint velocity
                 self.asset.data.joint_vel,
 
+                # 3 - base angular velocity
                 self.asset.data.root_ang_vel_b,
 
+                # 3 - projected gravity
                 self.asset.data.projected_gravity_b,
 
+                # 3 - commanded base velocity
                 commands,
 
+                # 12 - previous action
                 self._prev_action,
-
-                foot_contact,
             ),
             dim=-1,
         )
 
-        self._prev_action = actions
+        # Store the current action for the next observation.
+        self._prev_action = actions.clone()
 
         return _safe_obs_tensor(observations)
-    
+
+
 class CustomPrivilegedObservations(ManagerTermBase):
+    """
+    Privileged observation used by the DreamWaQ critic.
+
+    Layout:
+        45 - proprioception
+        N  - terrain height measurements
+         3 - true base linear velocity
+
+    For the intended DreamWaQ terrain scanner:
+        45 + 187 + 3 = 235 dimensions.
+    """
+
     def __init__(
-          self,
-          cfg: ObservationTermCfg,
-          env: ManagerBasedRLEnv,
-          num_action: int = 12,
+        self,
+        cfg: ObservationTermCfg,
+        env: ManagerBasedRLEnv,
+        num_action: int = 12,
     ):
         super().__init__(cfg, env)
 
         self.num_action = num_action
 
-        self.asset: Articulation = env.scene[cfg.params["asset_cfg"].name]
-        self.contact_sensor: ContactSensor = env.scene.sensors["contact_forces"]
-        self.ray_sensor: RayCaster = env.scene.sensors["height_scanner"]
+        self.asset: Articulation = env.scene[
+            cfg.params["asset_cfg"].name
+        ]
+
+        self.ray_sensor: RayCaster = env.scene.sensors[
+            "height_scanner"
+        ]
 
         self.asset_cfg = cfg.params["asset_cfg"]
         self.sensor_cfg = cfg.params["sensor_cfg"]
@@ -132,13 +163,13 @@ class CustomPrivilegedObservations(ManagerTermBase):
             device=self.device,
         )
 
-        self.foot_ids, _ = self.contact_sensor.find_bodies(
-            ".*_foot",
-            preserve_order=True,
-        )
+    def reset(self, env_ids: Sequence[int] | None = None):
+        """Reset the stored previous actions."""
 
-    def reset(self, env_ids=None):
-        self._prev_action[env_ids] = 0.0
+        if env_ids is None:
+            self._prev_action.zero_()
+        else:
+            self._prev_action[env_ids] = 0.0
 
     def __call__(
         self,
@@ -147,42 +178,73 @@ class CustomPrivilegedObservations(ManagerTermBase):
         sensor_cfg: SceneEntityCfg,
     ) -> torch.Tensor:
 
-        forces_w = self.contact_sensor.data.net_forces_w
-        foot_forces = forces_w[:, self.foot_ids, :]
-        foot_contact = (foot_forces.norm(dim=-1) > 1.0).float()
+        commands = env.command_manager.get_command(
+            "base_velocity"
+        )
 
-        commands = env.command_manager.get_command("base_velocity")
-        actions = env.action_manager.get_term("joint_pos").raw_actions
+        actions = env.action_manager.get_term(
+            "joint_pos"
+        ).raw_actions
+
+        # ---------------------------------------------------------
+        # Proprioceptive part: 45 dimensions
+        # ---------------------------------------------------------
 
         proprio = torch.cat(
             (
-                self.asset.data.joint_pos - self.asset.data.default_joint_pos,
+                # 12 - joint position error
+                self.asset.data.joint_pos
+                - self.asset.data.default_joint_pos,
+
+                # 12 - joint velocity
                 self.asset.data.joint_vel,
+
+                # 3 - base angular velocity
                 self.asset.data.root_ang_vel_b,
+
+                # 3 - projected gravity
                 self.asset.data.projected_gravity_b,
+
+                # 3 - commanded base velocity
                 commands,
+
+                # 12 - previous action
                 self._prev_action,
-                foot_contact,
             ),
             dim=-1,
         )
 
+        # ---------------------------------------------------------
+        # Terrain information
+        # ---------------------------------------------------------
+
         heights = self._get_heights()
+
+        # ---------------------------------------------------------
+        # Privileged observation
+        # ---------------------------------------------------------
 
         privileged = torch.cat(
             (
+                # 45 - proprioception
                 proprio,
+
+                # terrain height scan
                 heights,
+
+                # 3 - true base linear velocity
                 self.asset.data.root_lin_vel_b,
             ),
             dim=-1,
         )
 
-        self._prev_action = actions
+        # Store current action for the next timestep.
+        self._prev_action = actions.clone()
 
         return _safe_obs_tensor(privileged)
 
-    def _get_heights(self):
+    def _get_heights(self) -> torch.Tensor:
+        """Return clipped terrain height measurements."""
 
         heights = torch.clip(
             self.ray_sensor.data.pos_w[:, 2].unsqueeze(1)
@@ -194,18 +256,34 @@ class CustomPrivilegedObservations(ManagerTermBase):
 
         return _safe_obs_tensor(heights)
 
+
 class CustomProprioceptionHistory(ManagerTermBase):
     """
-    Maintains a rolling history of proprioceptive observations.
-    Used by DreamWaQ's adaptation module.
+    Maintains the last five frames of DreamWaQ proprioception.
+
+    Each frame contains 45 dimensions:
+
+        12 - joint position error
+        12 - joint velocity
+         3 - base angular velocity
+         3 - projected gravity
+         3 - commanded base velocity
+        12 - previous action
+
+    History:
+
+        5 frames × 45 dimensions = 225 dimensions
+
+    This history is used as the input to the DreamWaQ
+    adaptation/history encoder.
     """
 
     def __init__(
         self,
         cfg: ObservationTermCfg,
         env: ManagerBasedRLEnv,
-        history_length: int = 30,
-        num_prop: int = 49,
+        history_length: int = 5,
+        num_prop: int = 45,
         num_action: int = 12,
     ):
         super().__init__(cfg, env)
@@ -214,11 +292,19 @@ class CustomProprioceptionHistory(ManagerTermBase):
         self.num_prop = num_prop
         self.num_action = num_action
 
-        self.asset: Articulation = env.scene[cfg.params["asset_cfg"].name]
-        self.contact_sensor: ContactSensor = env.scene.sensors["contact_forces"]
+        self.asset: Articulation = env.scene[
+            cfg.params["asset_cfg"].name
+        ]
 
         self.asset_cfg = cfg.params["asset_cfg"]
         self.sensor_cfg = cfg.params["sensor_cfg"]
+
+        # ---------------------------------------------------------
+        # History buffer
+        #
+        # Shape:
+        # [num_envs, 5, 45]
+        # ---------------------------------------------------------
 
         self._obs_history_buffer = torch.zeros(
             self.num_envs,
@@ -227,20 +313,22 @@ class CustomProprioceptionHistory(ManagerTermBase):
             device=self.device,
         )
 
+        # Previous action used as part of the 45-D observation.
         self._prev_action = torch.zeros(
             self.num_envs,
             self.num_action,
             device=self.device,
         )
 
-        self.foot_ids, _ = self.contact_sensor.find_bodies(
-            ".*_foot",
-            preserve_order=True,
-        )
-
     def reset(self, env_ids: Sequence[int] | None = None):
-        self._obs_history_buffer[env_ids] = 0.0
-        self._prev_action[env_ids] = 0.0
+        """Reset history and previous actions."""
+
+        if env_ids is None:
+            self._obs_history_buffer.zero_()
+            self._prev_action.zero_()
+        else:
+            self._obs_history_buffer[env_ids] = 0.0
+            self._prev_action[env_ids] = 0.0
 
     def __call__(
         self,
@@ -250,40 +338,78 @@ class CustomProprioceptionHistory(ManagerTermBase):
         num_hist: int = 5,
     ) -> torch.Tensor:
 
-        forces_w = self.contact_sensor.data.net_forces_w
-        foot_forces = forces_w[:, self.foot_ids, :]
-        foot_contact = (foot_forces.norm(dim=-1) > 1.0).float()
+        commands = env.command_manager.get_command(
+            "base_velocity"
+        )
 
-        commands = env.command_manager.get_command("base_velocity")
-        actions = env.action_manager.get_term("joint_pos").raw_actions
+        actions = env.action_manager.get_term(
+            "joint_pos"
+        ).raw_actions
+
+        # ---------------------------------------------------------
+        # Build current 45-D proprioceptive observation
+        # ---------------------------------------------------------
 
         obs = torch.cat(
             (
-                self.asset.data.joint_pos - self.asset.data.default_joint_pos,
+                # 12 - joint position error
+                self.asset.data.joint_pos
+                - self.asset.data.default_joint_pos,
+
+                # 12 - joint velocity
                 self.asset.data.joint_vel,
+
+                # 3 - base angular velocity
                 self.asset.data.root_ang_vel_b,
+
+                # 3 - projected gravity
                 self.asset.data.projected_gravity_b,
+
+                # 3 - commanded base velocity
                 commands,
+
+                # 12 - previous action
                 self._prev_action,
-                foot_contact,
             ),
             dim=-1,
         )
 
-        self._obs_history_buffer = torch.where(
-            (env.episode_length_buf <= 1)[:, None, None],
-            torch.stack([obs] * self.history_length, dim=1),
-            torch.cat(
-                (
-                    self._obs_history_buffer[:, 1:],
-                    obs.unsqueeze(1),
-                ),
-                dim=1,
+        # ---------------------------------------------------------
+        # Update history
+        # ---------------------------------------------------------
+
+        first_step = env.episode_length_buf <= 1
+
+        new_history = torch.cat(
+            (
+                self._obs_history_buffer[:, 1:],
+                obs.unsqueeze(1),
             ),
+            dim=1,
         )
 
-        self._prev_action = actions
+        # At the beginning of an episode, initialize every
+        # history frame with the current observation instead of
+        # leaving old/zero history.
+        self._obs_history_buffer = torch.where(
+            first_step[:, None, None],
+            obs.unsqueeze(1).expand(
+                -1,
+                self.history_length,
+                -1,
+            ),
+            new_history,
+        )
+
+        # Store current action for the next timestep.
+        self._prev_action = actions.clone()
+
+        # ---------------------------------------------------------
+        # Return requested number of history frames
+        # ---------------------------------------------------------
+
+        history = self._obs_history_buffer[:, -num_hist:]
 
         return _safe_obs_tensor(
-            self._obs_history_buffer[:, -num_hist:]
+            history.reshape(self.num_envs, -1)
         )

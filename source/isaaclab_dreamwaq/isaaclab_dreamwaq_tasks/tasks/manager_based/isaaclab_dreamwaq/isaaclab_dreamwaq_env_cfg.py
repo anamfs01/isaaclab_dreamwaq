@@ -18,9 +18,9 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.envs.mdp.actions.actions_cfg import JointPositionActionCfg
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
-
+from isaaclab.envs import mdp as isaaclab_mdp
 from . import mdp
-print(dir(mdp))
+
 ##
 # Pre-defined configs
 ##
@@ -35,8 +35,8 @@ from isaaclab.utils.assets import (
     ISAACLAB_NUCLEUS_DIR,
 )
 
-from isaaclab_dreamwaq.terrains import ROUGH_TERRAINS_CFG
 
+from .terrains import ROUGH_TERRAINS_CFG
 
 ##
 # Scene definition
@@ -121,7 +121,7 @@ class IsaaclabDreamwaqSceneCfg(InteractiveSceneCfg):
 class CommandsCfg:
     """Command specifications for the MDP."""
 
-    base_velocity = mdp.UniformVelocityCommandCfg(
+    base_velocity = isaaclab_mdp.UniformVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(10.0, 10.0),
         rel_standing_envs=0.05,
@@ -129,7 +129,7 @@ class CommandsCfg:
         heading_command=True,
         heading_control_stiffness=0.5,
         debug_vis=False,
-        ranges=mdp.UniformVelocityCommandCfg.Ranges(
+        ranges=isaaclab_mdp.UniformVelocityCommandCfg.Ranges(
             lin_vel_x=(-1.0, 1.0),
             lin_vel_y=(-0.5, 0.5),
             ang_vel_z=(-1.0, 1.0),
@@ -139,7 +139,7 @@ class CommandsCfg:
 
 @configclass
 class ActionsCfg:
-    """Action specifications for the MDP."""
+    """Joint position actions for the Unitree Go2."""
 
     joint_pos = JointPositionActionCfg(
         asset_name="robot",
@@ -148,7 +148,6 @@ class ActionsCfg:
         use_default_offset=True,
         clip={".*": (-100.0, 100.0)},
     )
-
 
 @configclass
 class ObservationsCfg:
@@ -195,7 +194,7 @@ class ObservationsCfg:
             self.enable_corruption = False
             self.concatenate_terms = True
 
-    policy: PolicyCfg = PolicyCfg()
+    actor: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
 
 @configclass
@@ -203,7 +202,7 @@ class EventCfg:
     """Configuration for events."""
 
     physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
+        func=isaaclab_mdp.randomize_rigid_body_material,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
@@ -215,7 +214,7 @@ class EventCfg:
     )
 
     add_base_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
+        func=isaaclab_mdp.randomize_rigid_body_mass,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
@@ -225,7 +224,7 @@ class EventCfg:
     )
 
     base_external_force_torque = EventTerm(
-        func=mdp.apply_external_force_torque,
+        func=isaaclab_mdp.apply_external_force_torque,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
@@ -235,7 +234,7 @@ class EventCfg:
     )
 
     reset_base = EventTerm(
-        func=mdp.reset_root_state_uniform,
+        func=isaaclab_mdp.reset_root_state_uniform,
         mode="reset",
         params={
             "pose_range": {
@@ -255,7 +254,7 @@ class EventCfg:
     )
 
     reset_robot_joints = EventTerm(
-        func=mdp.reset_joints_by_scale,
+        func=isaaclab_mdp.reset_joints_by_scale,
         mode="reset",
         params={
             "position_range": (0.5, 1.5),
@@ -264,7 +263,7 @@ class EventCfg:
     )
 
     push_robot = EventTerm(
-        func=mdp.push_by_setting_velocity,
+        func=isaaclab_mdp.push_by_setting_velocity,
         mode="interval",
         interval_range_s=(10.0, 15.0),
         params={
@@ -277,42 +276,150 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Reward terms for the MDP."""
+    """DreamWaQ locomotion reward terms."""
 
-    # (1) Constant running reward
-    alive = RewTerm(func=mdp.is_alive, weight=1.0)
-    # (2) Failure penalty
-    terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
-    # (3) Primary task: keep pole upright
-    pole_pos = RewTerm(
-        func=mdp.joint_pos_target_l2,
+    # ------------------------------------------------------------------
+    # Velocity tracking
+    # ------------------------------------------------------------------
+
+    track_lin_vel_xy = RewTerm(
+    func=mdp.track_lin_vel_xy_exp,
+    weight=1.0,
+    params={
+        "command_name": "base_velocity",
+        "std": 0.5,
+        "asset_cfg": SceneEntityCfg("robot"),
+        
+    },
+)
+
+    track_ang_vel_z = RewTerm(
+    func=mdp.track_ang_vel_z_exp,
+    weight=0.5,
+    params={
+        "command_name": "base_velocity",
+        "std": 0.5,
+        "asset_cfg": SceneEntityCfg("robot"),
+    },
+)
+
+    # ------------------------------------------------------------------
+    # Base motion penalties
+    # ------------------------------------------------------------------
+
+    lin_vel_z = RewTerm(
+        func=mdp.lin_vel_z_l2,
+        weight=-2.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    ang_vel_xy = RewTerm(
+        func=mdp.ang_vel_xy_l2,
+        weight=-0.05,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    orientation = RewTerm(
+        func=mdp.orientation_l2,
+        weight=-0.2,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    # ------------------------------------------------------------------
+    # Joint / actuator penalties
+    # ------------------------------------------------------------------
+
+    joint_acc = RewTerm(
+        func=mdp.joint_acceleration_l2,
+        weight=-2.5e-7,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    joint_power = RewTerm(
+        func=mdp.joint_power_l1,
+        weight=-2.0e-5,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    # ------------------------------------------------------------------
+    # Body / foot rewards
+    # ------------------------------------------------------------------
+
+    body_height = RewTerm(
+        func=mdp.body_height_l2,
         weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"]), "target": 0.0},
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("height_scanner"),
+            "target_height": 0.30,
+        },
     )
-    # (4) Shaping tasks: lower cart velocity
-    cart_vel = RewTerm(
-        func=mdp.joint_vel_l1,
+
+    foot_clearance = RewTerm(
+        func=mdp.foot_clearance,
         weight=-0.01,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["slider_to_cart"])},
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                body_names=".*foot",
+            ),
+            "sensor_cfg": SceneEntityCfg("height_scanner"),
+            "target_height": 0.08,
+        },
     )
-    # (5) Shaping tasks: lower pole angular velocity
-    pole_vel = RewTerm(
-        func=mdp.joint_vel_l1,
-        weight=-0.005,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"])},
+
+    # ------------------------------------------------------------------
+    # Action smoothness
+    # ------------------------------------------------------------------
+
+    action_rate = RewTerm(
+        func=mdp.action_rate_l2,
+        weight=-0.01,
+    )
+
+    smoothness = RewTerm(
+        func=mdp.SmoothnessL2,
+        weight=-0.01,
+    )
+
+    # ------------------------------------------------------------------
+    # Power distribution
+    # ------------------------------------------------------------------
+
+    power_distribution = RewTerm(
+        func=mdp.power_distribution,
+        weight=-1.0e-5,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
     )
 
 
 @configclass
 class TerminationsCfg:
-    """Termination terms for the MDP."""
+    """Termination conditions for DreamWaQ locomotion."""
 
-    # (1) Time out
-    time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    # (2) Cart out of bounds
-    cart_out_of_bounds = DoneTerm(
-        func=mdp.joint_pos_out_of_manual_limit,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["slider_to_cart"]), "bounds": (-3.0, 3.0)},
+    time_out = DoneTerm(
+        func=isaaclab_mdp.time_out,
+        time_out=True,
+    )
+
+    base_height = DoneTerm(
+        func=mdp.root_height_below_minimum,
+        params={
+            "minimum_height": 0.15,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
     )
 
 
